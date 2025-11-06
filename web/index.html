@@ -145,7 +145,7 @@
     <div class="footer">Frontend: HTML + CSS (vanilla). Works with your FastAPI sentiment endpoint at <code>/predict</code>.</div>
   </div>
 
-  <script>
+  <!-- <script>
     // Minimal JS to wire the UI to your FastAPI endpoint
     const apiUrlEl = document.getElementById('apiUrl');
     const textEl = document.getElementById('text');
@@ -244,6 +244,147 @@
 
     // Initial ping after load
     setTimeout(ping, 400);
-  </script>
+  </script> -->
+  <script>
+  // ---------- UI handles ----------
+  const apiUrlEl   = document.getElementById('apiUrl');
+  const textEl     = document.getElementById('text');
+  const analyzeBtn = document.getElementById('analyzeBtn');
+  const checkBtn   = document.getElementById('checkBtn');
+  const statusEl   = document.getElementById('status');
+  const apiStatusEl= document.getElementById('apiStatus');
+  const labelEl    = document.getElementById('label');
+  const barEl      = document.getElementById('bar');
+  const rawEl      = document.getElementById('raw');
+  const historyEl  = document.getElementById('history');
+
+  // ---------- helpers ----------
+  function setStatus(msg, ok=true){
+    statusEl.style.display = 'flex';
+    statusEl.style.borderColor = ok ? 'rgba(76,195,138,.35)' : 'rgba(239,95,107,.35)';
+    statusEl.textContent = msg;
+  }
+  function setAPIStatus(txt, color){
+    apiStatusEl.textContent = txt;
+    apiStatusEl.style.color = color;
+  }
+
+  function renderResult(data){
+    let label = data.label || data.prediction || 'N/A';
+    let score = data.score;
+    if (score == null){
+      const probs = data.probabilities || {};
+      score = Math.max(...Object.values(probs || {0:0}));
+    }
+    score = Math.round((score||0)*100);
+
+    labelEl.textContent = label;
+    labelEl.className = 'tag ' + (label.toLowerCase().includes('pos') ? 'good'
+                      : label.toLowerCase().includes('neg') ? 'bad' : 'warn');
+    barEl.style.width = score + '%';
+    barEl.className = 'bar ' + (label.toLowerCase().includes('pos') ? 'pos'
+                      : label.toLowerCase().includes('neg') ? 'neg' : '');
+    rawEl.textContent = JSON.stringify(data, null, 2);
+  }
+
+  function pushHistory(input, data){
+    const div = document.createElement('div');
+    div.className = 'hist-item';
+    const tag = document.createElement('span');
+    const label = (data.label||data.prediction||'').toString().toUpperCase();
+    tag.className = 'tag ' + (label.includes('POS') ? 'good' : label.includes('NEG') ? 'bad' : 'warn');
+    tag.textContent = label || 'RESULT';
+    const txt = document.createElement('div');
+    txt.className = 'txt'; txt.title = input; txt.textContent = input;
+    const conf = document.createElement('div');
+    conf.className = 'small';
+    const score = data.score != null ? data.score : Math.max(...Object.values(data.probabilities||{0:0}));
+    conf.textContent = 'score ' + (typeof score === 'number' ? (Math.round(score*100)/100) : score);
+    div.append(tag, txt, conf);
+    historyEl.prepend(div);
+  }
+
+  // ---------- auto-detect API ----------
+  async function probe(url){
+    try{
+      const health = url.replace(/\/predict\s*$/,'/health');
+      const r = await fetch(health, { method:'GET' });
+      if (!r.ok) throw new Error(r.status);
+      await r.json(); // must be json
+      return true;
+    }catch(e){ return false; }
+  }
+
+  async function autoDetectAPI(){
+    // Priority: ?api= override > saved > same-origin /predict > /api/predict > localhost:8000/predict
+    const params = new URLSearchParams(location.search);
+    const override = params.get('api');
+    const saved = localStorage.getItem('API_URL');
+
+    const sameOrigin = location.origin;
+    const candidates = [
+      override,
+      saved,
+      `${sameOrigin}/predict`,
+      `${sameOrigin}/api/predict`,
+      `http://localhost:8000/predict`
+    ].filter(Boolean);
+
+    for (const c of candidates){
+      if (await probe(c)){
+        apiUrlEl.value = c;
+        localStorage.setItem('API_URL', c);
+        setAPIStatus('online', '#4cc38a');
+        setStatus(`Using API: ${c}`, true);
+        // optional: hide the field once auto-detected
+        apiUrlEl.readOnly = true;
+        apiUrlEl.style.opacity = 0.7;
+        return c;
+      }
+    }
+    // nothing worked
+    setAPIStatus('offline', '#ef5f6b');
+    setStatus('Could not auto-detect API. Start your server or pass ?api= URL.', false);
+    // leave a sensible default for user
+    apiUrlEl.value = saved || `http://localhost:8000/predict`;
+    return null;
+  }
+
+  async function ping(){
+    const ok = await probe(apiUrlEl.value);
+    if (ok){
+      setAPIStatus('online', '#4cc38a');
+      setStatus('API is reachable.', true);
+    } else {
+      setAPIStatus('offline', '#ef5f6b');
+      setStatus('API not reachable at ' + apiUrlEl.value, false);
+    }
+  }
+
+  analyzeBtn.addEventListener('click', async ()=>{
+    const url = apiUrlEl.value.trim();
+    const text = textEl.value.trim();
+    if(!url || !text){ setStatus('Enter API URL and some text', false); return; }
+    setStatus('Sending request…', true);
+    try{
+      const r = await fetch(url, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ text })
+      });
+      const j = await r.json();
+      renderResult(j);
+      pushHistory(text, j);
+      setStatus('Success', true);
+    }catch(e){
+      setStatus('Request failed. Check CORS and server logs.', false);
+    }
+  });
+
+  checkBtn.addEventListener('click', ping);
+
+  // Kick off auto-detection after load
+  window.addEventListener('load', autoDetectAPI);
+</script>
 </body>
 </html>
