@@ -1,43 +1,63 @@
-name: build-and-push
-on:
-  push:
-    branches: [ "main" ]
-  schedule:
-    - cron: "0 3 * * 1"   # weekly Monday 03:00 UTC
+stages:
+  - build
+  - test
 
-jobs:
-  docker:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
+variables:
+  DOCKER_DRIVER: overlay2
+  IMAGE_API: "$CI_REGISTRY_IMAGE/api"
+  IMAGE_WEB: "$CI_REGISTRY_IMAGE/web"
+  TAG: "latest"
 
-      - uses: docker/setup-buildx-action@v3
+# Enable docker-in-docker
+default:
+  image: docker:26
+  services:
+    - docker:26-dind
+  before_script:
+    - echo "$CI_JOB_TOKEN" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
 
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+build_api:
+  stage: build
+  script:
+    - docker build -f Dockerfile -t "$IMAGE_API:$TAG" .
+    - docker push "$IMAGE_API:$TAG"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"
 
-      - name: Build and push API
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: Dockerfile.api
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository }}-api:latest
-            ghcr.io/${{ github.repository }}-api:${{ github.sha }}
+build_web:
+  stage: build
+  script:
+    - docker build -f web/Dockerfile -t "$IMAGE_WEB:$TAG" .
+    - docker push "$IMAGE_WEB:$TAG"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"
 
-      - name: Build and push Web
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: Dockerfile.web
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository }}-web:latest
-            ghcr.io/${{ github.repository }}-web:${{ github.sha }}
+smoke_api:
+  stage: test
+  needs: ["build_api"]
+  script: |
+    set -e
+    docker pull "$IMAGE_API:$TAG"
+    # run API
+    docker run -d --rm --name api -p 8000:8000 "$IMAGE_API:$TAG"
+    # wait for readiness (up to ~30s)
+    for i in $(seq 1 30); do
+      if docker exec api python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" >/dev/null 2>&1; then
+        echo "API healthy"; break
+      fi
+      echo "Waiting for API..."
+      sleep 1
+    done
+    # final check from runner network
+    apk add --no-cache curl || true
+    curl -fsS http://localhost:8000/health
+    # cleanup
+    docker stop api
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"

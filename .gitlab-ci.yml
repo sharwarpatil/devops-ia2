@@ -1,0 +1,39 @@
+stages:
+  - build
+  - test
+
+image: docker:26
+services:
+  - docker:26-dind
+
+variables:
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_TLS_CERTDIR: ""
+  IMAGE_API: "$CI_REGISTRY_IMAGE/api"
+  IMAGE_WEB: "$CI_REGISTRY_IMAGE/web"
+  TAG: "latest"
+
+before_script:
+  - echo "$CI_JOB_TOKEN" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+
+build_api:
+  stage: build
+  script:
+    - docker build -f Dockerfile -t "$IMAGE_API:$TAG" .
+    - docker push "$IMAGE_API:$TAG"
+
+build_web:
+  stage: build
+  script:
+    - docker build -f web/Dockerfile -t "$IMAGE_WEB:$TAG" web
+    - docker push "$IMAGE_WEB:$TAG"
+
+smoke_api:
+  stage: test
+  needs: ["build_api"]
+  script:
+    - docker pull "$IMAGE_API:$TAG"
+    - docker run -d --rm --name api -p 8000:8000 "$IMAGE_API:$TAG"
+    - apk add --no-cache curl
+    - for i in $(seq 1 20); do curl -fsS http://localhost:8000/health && break || sleep 2; done
+    - docker stop api
