@@ -1,3 +1,42 @@
+# stages:
+#   - build
+#   - test
+
+# image: docker:26
+# services:
+#   - docker:26-dind
+
+# variables:
+#   DOCKER_HOST: tcp://docker:2375
+#   DOCKER_TLS_CERTDIR: ""
+#   IMAGE_API: "$CI_REGISTRY_IMAGE/api"
+#   IMAGE_WEB: "$CI_REGISTRY_IMAGE/web"
+#   TAG: "latest"
+
+# before_script:
+#   - echo "$CI_JOB_TOKEN" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+
+# build_api:
+#   stage: build
+#   script:
+#     - docker build -f Dockerfile -t "$IMAGE_API:$TAG" .
+#     - docker push "$IMAGE_API:$TAG"
+
+# build_web:
+#   stage: build
+#   script:
+#     - docker build -f web/Dockerfile -t "$IMAGE_WEB:$TAG" web
+#     - docker push "$IMAGE_WEB:$TAG"
+
+# smoke_api:
+#   stage: test
+#   needs: ["build_api"]
+#   script:
+#     - docker pull "$IMAGE_API:$TAG"
+#     - docker run -d --rm --name api -p 8000:8000 "$IMAGE_API:$TAG"
+#     - apk add --no-cache curl
+#     - for i in $(seq 1 20); do curl -fsS http://localhost:8000/health && break || sleep 2; done
+#     - docker stop api
 stages:
   - build
   - test
@@ -9,96 +48,76 @@ services:
 variables:
   DOCKER_HOST: tcp://docker:2375
   DOCKER_TLS_CERTDIR: ""
-  DOCKER_BUILDKIT: "1"
-
   IMAGE_API: "$CI_REGISTRY_IMAGE/api"
   IMAGE_WEB: "$CI_REGISTRY_IMAGE/web"
-  TAG_LATEST: "latest"
-  TAG_SHA: "$CI_COMMIT_SHORT_SHA"
+  TAG: "latest"
 
 before_script:
   - echo "$CI_JOB_TOKEN" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
 
-# ---------- BUILD ----------
-
 build_api:
   stage: build
   script:
-    - docker build --pull -f Dockerfile -t "$IMAGE_API:$TAG_LATEST" -t "$IMAGE_API:$TAG_SHA" .
-    - docker push "$IMAGE_API:$TAG_LATEST"
-    - docker push "$IMAGE_API:$TAG_SHA"
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "push"
-    - if: $CI_PIPELINE_SOURCE == "schedule"
-    - if: $CI_PIPELINE_SOURCE == "web"
+    - docker build -f Dockerfile -t "$IMAGE_API:$TAG" .
+    - docker push "$IMAGE_API:$TAG"
 
 build_web:
   stage: build
   script:
-    # context is web/, Dockerfile is web/Dockerfile
-    - docker build --pull -f web/Dockerfile -t "$IMAGE_WEB:$TAG_LATEST" -t "$IMAGE_WEB:$TAG_SHA" web
-    - docker push "$IMAGE_WEB:$TAG_LATEST"
-    - docker push "$IMAGE_WEB:$TAG_SHA"
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "push"
-    - if: $CI_PIPELINE_SOURCE == "schedule"
-    - if: $CI_PIPELINE_SOURCE == "web"
-
-# ---------- TEST ----------
+    - docker build -f web/Dockerfile -t "$IMAGE_WEB:$TAG" web
+    - docker push "$IMAGE_WEB:$TAG"
 
 smoke_api:
   stage: test
   needs: ["build_api"]
-  image: docker:26
-  services:
-    - docker:26-dind
-  variables:
-    DOCKER_HOST: tcp://docker:2375
-    DOCKER_TLS_CERTDIR: ""
-  script: |
-    set -euo pipefail
-
-    # Pull the exact image built in this pipeline (sha tag is immutable)
-    docker pull "$IMAGE_API:$TAG_SHA" || docker pull "$IMAGE_API:$TAG_LATEST"
-
-    # Start the API container (port publishing not required since we exec inside)
-    docker run -d --rm --name api "$IMAGE_API:$TAG_SHA" || docker run -d --rm --name api "$IMAGE_API:$TAG_LATEST"
-
-    echo "Waiting for API to become healthy (inside the container)..."
-    ok=0
-    for i in $(seq 1 120); do
-      if docker exec api python - <<'PY'
-import urllib.request, sys
-try:
-    urllib.request.urlopen("http://localhost:8000/health", timeout=1).read()
-    sys.exit(0)
-except Exception:
-    sys.exit(1)
-PY
-      then
-        echo "✅ API healthy"
-        ok=1
-        break
-      fi
-      sleep 1
-    done
-
-    if [ "$ok" -ne 1 ]; then
-      echo "❌ API never became healthy. Container logs:"
-      docker logs api || true
-      # If ss is available, show listening ports
-      docker exec api sh -lc 'command -v ss >/dev/null && ss -lnt || true' || true
-      exit 1
-    fi
+  script:
+    - docker pull "$IMAGE_API:$TAG"
+    # Start container with explicit logging
+    - docker run -d --name api -p 8000:8000 "$IMAGE_API:$TAG"
+    # Give it a moment to initialize
+    - sleep 5
+    # Check if container is still running
+    - docker ps -a | grep api
+    # Show logs for debugging
+    - echo "=== Container Logs ==="
+    - docker logs api
+    # Install curl
+    - apk add --no-cache curl
+    # Wait for health endpoint with better error handling
+    - |
+      echo "=== Checking health endpoint ==="
+      for i in $(seq 1 30); do
+        echo "Attempt $i/30..."
+        if curl -fsS http://localhost:8000/health; then
+          echo "✓ Health check passed!"
+          break
+        fi
+        if [ $i -eq 30 ]; then
+          echo "✗ Health check failed after 30 attempts"
+          echo "=== Final container logs ==="
+          docker logs api
+          docker ps -a
+          exit 1
+        fi
+        sleep 3
+      done
+    # Optional: Test the predict endpoint
+    - |
+      echo "=== Testing predict endpoint ==="
+      curl -X POST http://localhost:8000/predict \
+        -H "Content-Type: application/json" \
+        -d '{"text":"This is a test"}'
   after_script:
-    - docker logs api > api_logs.txt 2>&1 || true
     - docker stop api || true
-  artifacts:
-    when: always
-    paths:
-      - api_logs.txt
-    expire_in: 7 days
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "push"
-    - if: $CI_PIPELINE_SOURCE == "schedule"
-    - if: $CI_PIPELINE_SOURCE == "web"
+    - docker rm api || true
+
+smoke_web:
+  stage: test
+  needs: ["build_web"]
+  script:
+    - docker pull "$IMAGE_WEB:$TAG"
+    - docker run -d --name web -p 8080:80 "$IMAGE_WEB:$TAG"
+    - apk add --no-cache curl
+    - sleep 2
+    - curl -fsS http://localhost:8080/ | grep -i "sentiment"
+    - docker stop web
