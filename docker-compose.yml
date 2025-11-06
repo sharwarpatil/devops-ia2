@@ -1,0 +1,25 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile        # <-- root Dockerfile
+    image: sentiment-api:local
+    ports:
+      - "8000:8000"
+    # use a python-based healthcheck (no curl/wget needed)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile        # <-- web/Dockerfile
+    image: sentiment-web:local
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_healthy
